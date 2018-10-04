@@ -1,0 +1,1225 @@
+;-------------------------------------------------------------------------
+; Port map
+;-------------------------------------------------------------------------
+;
+; Timing
+; 0x00 0x01 0x02 0x03 (LSB ... MSB) = current system time in ms (ports 0, 1, 2 and 3 are updated when port 0 is read) (RO)
+; 0x04 0x05 0x06 0x07 (LSB ... MSB) = timer interval in ms (used to start timers 0, 1, 2 and 3) (RW)
+; 0x08 = timer 0 on/off (0 stops the timer, while any other value either starts or restarts it) (RW)
+; 0x09 = timer 1 on/off (0 stops the timer, while any other value either starts or restarts it) (RW)
+; 0x0A = timer 2 on/off (0 stops the timer, while any other value either starts or restarts it) (RW)
+; 0x0B = timer 3 on/off (0 stops the timer, while any other value either starts or restarts it) (RW)
+;
+; Buttons and lighting
+; 0xE0 = number of the button which has been pressed/released (0 ... 15) (RO)
+; 0xE1 = current state of the toggled button (0 = released, 1 = pressed) (RO)
+; 0xE2 = light bulbs' state (bit 0 controls bulb 0 ...) (RW)
+;
+; EEPROM
+; 0xE3 = EEPROM address (by changing address, if OE = 1, data is updated with actual EEPROM's contents) (RW)
+; 0xE4 = EEPROM data (if OE = 1 writings are ignored) (RW)
+; 0xE5 = EEPROM control (RW)
+;        bit 0 = Not WR (by toggling from 1 to 0, data's contents is stored into the EEPROM)
+;        bit 1 = OE (OE = 1 makes data RO, while 0 makes it RW)
+;
+; Console
+; 0xE6 = general purpose value (RW)
+;		 - maximum amount of characters that the user is allowed to enter with command 1
+;		 - amount of characters to send to the console with command 3
+;		 - color component for commands 6 ... 11
+; 0xE7 = general purpose value (RW)
+;		 - row index for commands 5 ... 11
+; 0xE8 = control commands (RW)
+;		 0 = hides the console input
+;		 1 = shows the console input
+;		 2 = clears the console's memory
+;		 3 = sends the text pointed by 0xEC to console's memory (a 0 character stops the process, even if the value at 0xE6 is greater)
+;		 4 = copies the contents of the console's memory to the screen
+;		 5 = copies the contents of the given row, from the console's memory to the screen
+;		 6, 7, 8 = specifies the R, G or B component for the given row's background color
+;		 9, 10, 11 = specifies the R, G or B component for the given row's text color
+; 0xE9 = amount of characters typed by the user (this value is set to 0 by commands 0 and 1) (RO)
+; 0xEA = cursor's X position (0 ... 79) (RW)
+; 0xEB = cursor's Y position (0 ... 19 or 20, when Y = 20, the next character written to the screen causes it to scroll) (RW)
+; 0xEC 0xED 0xEE 0xEF (LSB ... MSB) = address where to fetch the text to be sent/to store the text typed by the user (RW)
+;
+; Reset
+; 0xFF = system reset (writing a value other than 0 resets the processor and finishes the execution) (WO)
+;
+;-------------------------------------------------------------------------
+; External interrupt map
+;-------------------------------------------------------------------------
+; 0x20 = timer 0
+; 0x21 = timer 1
+; 0x22 = timer 2
+; 0x23 = timer 3
+; 0x30 = buttons
+; 0x31 = console's input OK button
+;
+;-------------------------------------------------------------------------
+; Instructions for storing the context
+;-------------------------------------------------------------------------
+; XSAVE mem = stores the processor's state at the memory pointed to by mem (requires at least 36 bytes)
+; XRSTOR mem = loads the processor's state from the memory pointed to by mem (requires at least 36 bytes)
+; Instrução XSAVE stores the registers in the following order: EAX, EBX, ECX, EDX, ESI, EDI, EBP, ESP, FLAGS
+;-------------------------------------------------------------------------
+
+	;--------------------------------------------------------------------------------
+	;       ----  || NOTES ||  ----
+	; * _atoi , _itoa , and _hex_to_char_ might need optimization
+	; * work on actual command functions
+	; * work on INT 32 and others
+	;--------------------------------------------------------------------------------
+	
+	cli
+	mov proc_id, 1
+	mov eax, 0
+	out 0x08, eax
+	
+	mov ebp, esp          ; initialize
+	sub esp, 17900
+	mov eax, esp          ; set up pointers
+	add eax, 4
+	mov input_text, eax   ; point to input text
+	add eax, 256
+	mov out_text, eax
+	add eax, 512
+	mov dword ptr[command_args], eax ; point to command args (string tokens after split)
+	mov edi, eax
+	add eax, 512
+	mov commands, eax     ; point to list of commands
+	mov ebx, eax
+	
+	mov dword ptr[eax], 0x00646461     ;add\n
+	mov dword ptr[eax+4], 0x00627573   ;sub\n
+	mov dword ptr[eax+8], 0x006c756d   ;mul\n
+	mov dword ptr[eax+12], 0x00766964  ;div\n
+	mov dword ptr[eax+16], 0x6f686365  ;echo
+	mov byte ptr[eax+20], 0x00         ;\n
+	
+	add eax, 256                       ; 1280 item lookup table, 12 byte aligned
+	mov lookup_table, eax              ; 8 byte id     4 byte address
+	
+	;add eax, 15360
+	;push eax
+	;mov word ptr[eax], 994
+	;mov ebx, eax
+	;add ebx, 6
+	;mov dword ptr[eax+2], 0
+	
+	mov eax, 17000                      ; set up interrupt descriptor table
+	mov ebx, eax
+	push eax
+	;mov word ptr[eax], 1020            ; length - 1020
+	;mov ebx, eax
+	;add ebx, 6
+	;mov dword ptr[eax+2], ebx          ; 1200 -> 2220
+	
+	
+	add eax, 128
+	push eax
+	call _set_ISrs_
+	add esp, 4
+	;mov ebx, _irq_32
+	;mov dword ptr[eax], ebx
+	
+	pop ebx
+	lidt ebx
+	
+	mov eax, 100
+	;out 0x04, eax
+	in eax, 0x04
+	
+	mov eax, 10
+	out 0x08, eax
+	
+	; proccess table (110 bytes per entry)
+	; struct proc_tab_entry{
+	;	byte id;
+	;	uint32_t * ptr;
+	;	char[64] name;
+	;   byte[36] regs;         // at 69 bytes in
+	;   uint32_t lastTicks;    //at 105 bytes in
+	;   byte priority;
+	;}
+	
+	; TODO : Continue work at Int 32
+	
+	lea eax, proc                   ; address of proccess list
+	mov byte ptr[eax], 0x1          ; proc id 1 -> Kernel
+	
+	;int 34                          ;fetch mem chunk (2048 bytes)	
+	
+	mov dword ptr[eax+1], _loop      ;addr of mem chunk
+	mov dword ptr[eax+5], 0x4E52454B ; "KERNEL"
+	mov dword ptr[eax+9], 0x00004C45
+	
+	mov dword ptr[eax+69], eax       ; save regs - for use in case of pre-emption
+	mov dword ptr[eax+73], ebx
+	mov dword ptr[eax+77], ecx
+	mov dword ptr[eax+81], edx
+	mov dword ptr[eax+85], esi
+	mov dword ptr[eax+89], esi
+	mov dword ptr[eax+93], ebp
+	mov dword ptr[eax+97], esp
+	mov dword ptr[eax+101], _loop
+	
+	
+	add eax, 105
+	mov byte ptr[eax], 0x2          ; console id -> 2
+	
+	mov dword ptr[eax+1], check_commands
+	mov dword ptr[eax+5], 0x534E4F43    ; "CONSOLE"
+	mov dword ptr[eax+9], 0x00454C4F
+	
+	mov dword ptr[eax+69], eax       ; save regs - for use in case of pre-emption
+	mov dword ptr[eax+73], ebx
+	mov dword ptr[eax+77], ecx
+	mov dword ptr[eax+81], edx
+	mov dword ptr[eax+85], esi
+	mov dword ptr[eax+89], esi
+	mov dword ptr[eax+93], ebp
+	mov dword ptr[eax+97], esp
+	mov dword ptr[eax+101], check_commands
+	
+	in eax, 0x0
+	sti
+	;int 33
+	
+	mov eax, 0
+	mov ecx, 128
+	;rep stosd
+	
+	mov eax, input_text   ; address to store text input by user (256 bytes)
+	out 0xEC, eax
+	mov al, 1             ; allow input
+	out 0xE8, al
+	
+	
+	;start kernel
+	lea eax, proc
+	movzx ebx, byte ptr[eax]
+	mov proc_id, ebx
+	mov ebx, dword ptr[eax+1]
+	jmp ebx
+	
+check_commands:
+	push ebp
+	mov ebp, esp
+	sub esp, 0x100
+	
+	;setup and format input string
+	mov eax, 32
+	push eax
+	
+	lea eax, command_args
+	push eax
+	
+	mov eax, dword ptr[command_args]
+	push eax
+	
+	mov eax, input_text
+	push eax
+	call _formstring_
+	call _string_split
+	
+	;resume checking
+	
+	add esp, 16
+	lea eax, command_args
+	push eax
+	call get_argc
+	add esp, 4
+	mov argc, al
+	
+	mov eax, dword ptr[command_args]
+	push eax
+	
+	;is it add?
+	mov eax, commands
+	push eax
+	
+	call _stringcmp
+	add esp, 4
+	test eax, eax
+	jne _notadd
+	
+	;call add function here
+	lea eax, command_args
+	push eax
+	
+	movzx eax, argc
+	push eax
+	
+	call _add
+	push eax
+	
+	pop ebx
+	mov eax, out_text
+	mov dword ptr[eax], ebx
+	mov dword ptr[eax+4], 0x000000
+	push eax
+	
+	mov eax, ebx
+	
+	int 32                 ; for testing purposes
+	
+	call _hex_to_char_
+	call _itoa
+	call _old_char_method_
+	call print_text
+	
+	mov eax, out_text
+	add eax, 512
+	;repstosd here to flush out_text
+	mov ebx, dword ptr[eax]
+	
+	call _prnt_newline_
+	call _enable_input_
+	
+_notadd:
+	;is it sub?
+	mov eax, commands
+	add eax, 4
+	push eax
+	
+	call _stringcmp
+	add esp, 4
+	test eax, eax
+	jne _notsub
+	
+	;call sub here
+	
+	
+_notsub:
+	;is it mul?
+	mov eax, commands
+	add eax, 8
+	push eax
+	
+	call _stringcmp
+	add esp, 4
+	test eax, eax
+	jne _notmul
+	
+	;call mul here
+	
+	
+_notmul:
+	;is it div?
+	mov eax, commands
+	add eax, 12
+	push eax
+	
+	call _stringcmp
+	add esp, 4
+	test eax, eax
+	jne _notdiv
+	
+	;call div here
+	
+	
+_notdiv:
+	;is it echo?
+	mov eax, commands
+	add eax, 16
+	push eax
+	
+	call _stringcmp
+	add esp, 4
+	test eax, eax
+	jne _pre_loop               ;change as you add more commands
+	
+	;call echo here
+
+_pre_loop:
+	mov esp, ebp
+	pop ebp
+	
+	call _prnt_newline_
+	call _enable_input_
+	ret
+
+;----------------------------------------------------------------------------------------------------------------------------
+;        ||| MAIN LOOP, SHUTDOWN, AND MISC. |||
+;----------------------------------------------------------------------------------------------------------------------------
+
+_loop:
+	
+	jmp _loop
+	
+	
+SHUT_DOWN:
+	; Sending any byte other than 0 to port 255 finishes the execution
+	mov al, 1
+	out 255, al
+	
+_prnt_newline_:
+	mov eax, 0
+	out 0xEA, eax
+	in al, 0xEB
+	inc al
+	
+	mov al, yrow
+	inc al
+	inc yrow
+	cmp al, 20
+	jle nline
+	mov yrow, 20
+	mov al, 20
+	
+	nline:
+	out 0xEB, al
+	ret
+	
+_enable_input_:
+	;sanitize input method to allow another user input
+	mov edi, input_text
+	mov eax, 0
+	mov ecx, 64
+	rep stosd
+	
+	lea edi, command_args
+	add edi, 4
+	mov ecx, 255
+	rep stosd
+	
+	mov eax, input_text
+	out 0xEC, eax
+	mov al, 1             ; re-allow input
+	out 0xE8, al
+	
+	ret
+	
+;----------------------------------------------------------------------------------------------------------------------------
+;        ||| CHAR SND STRING FUNCTIONS |||
+;----------------------------------------------------------------------------------------------------------------------------
+
+print_text:
+	push ebp
+	mov ebp, esp
+	sub esp, 0
+	
+	mov eax, dword ptr[ebp+8] ; thing to be printed
+	out 0xEC, eax
+	mov eax, 0x0300FF
+	out 0xE6, eax
+	mov al, 4 ; Update the entire screen at once
+	out 0xE8, al
+	
+	call _prnt_newline_
+	
+	mov esp, ebp
+	pop ebp
+	ret
+	
+_formstring_:
+;make input correct ascii
+	push ebp
+	mov ebp, esp
+	sub esp, 0
+	
+	mov ecx, dword ptr[ebp+8]      ;get user input
+	mov dl, 0
+	mov dh, 0
+	f_loop:
+	mov al, byte ptr[ecx+dl]
+	mov byte ptr[ecx+dh], al
+	add dl, 2
+	inc dh
+	test al, al
+	jne f_loop
+	
+	mov esp, ebp
+	pop ebp
+	ret
+
+_stringcmp:
+;check against command list
+	push ebp                       ;save context
+	mov ebp, esp
+	sub esp, 0
+	
+	xor ebx, ebx
+	mov ecx, dword ptr[ebp+8]      ;get user input
+	mov esi, dword ptr[ebp+12]
+	mov edx, 0
+	mloop:
+	mov al, byte ptr[ecx+edx]
+	mov bl, byte ptr[esi+edx]
+	inc edx
+	cmp al, bl
+	jne anal_string_end
+	
+	test ebx, ebx                ;test if null char
+	jne mloop
+	xor eax, eax
+	mov esp, ebp
+	pop ebp
+	ret
+	
+	anal_string_end:
+	mov eax, 1
+	mov esp, ebp
+	pop ebp                        ;restore context
+	ret
+	
+_old_char_method_:
+;convert to char with all null separated characters
+;use before printing to screen
+	push ebp
+	mov ebp, esp
+	sub esp, 0
+	
+	mov ecx, dword ptr[ebp+8]     ;pointer to char* array
+	mov bl, 0
+	mov bh, 0
+	
+	xor edx, edx                  ;force zeroing of edx
+	oldchar_loop:
+	mov dl, byte ptr[ecx+bh]      ;get current char
+	push edx                      ;push onto stack
+	inc bh                        ;inc bh
+	test dl, dl
+	jne oldchar_loop              ;if not null char, continue
+	
+	xor edx, edx                  ;force zeroing of edx
+	oldchar_loop_two:
+	dec bh                        ;dec bh
+	mov bl, bh                    ;bl = bh * 2
+	add bl, bh
+	pop edx                       ;pop off stack
+	mov byte ptr[ecx+bl], dl      ;move dl to current byte
+	dec bl                        ;dec bl
+	mov byte ptr[ecx+bl], 0       ;move $00 to current byte - 1
+	test bh, bh                   ;test for zero
+	jne oldchar_loop_two
+	
+	mov esp, ebp
+	pop ebp
+	ret
+	
+_string_split:
+	; _string_split(char* str, int* strt_addr, int*[] token_addrs, char spltr);
+	push ebp
+	mov ebp, esp
+	sub esp, 0
+	
+	xor edx, edx
+	xor eax, eax
+	xor ebx, ebx
+	mov ecx, dword ptr[ebp+8]   ; get string
+	mov esi, dword ptr[ebp+12]  ; get target address
+	mov edi, dword ptr[ebp+16]  ; get char array to store token addresses
+	mov bl, byte ptr[ebp+20]    ; get char to split on
+	xor edx, edx                ; counter (dh) and last split position (dl)
+	mfloop:
+	mov al, byte ptr[ecx+dh]
+	inc dh
+	cmp al, 0
+	je pre_recur_ssplt
+	cmp al, bl
+	jne mfloop
+	
+	pre_recur_ssplt:
+	mov ah, dh
+	dec dh
+	
+	recur_ssplit:
+	dec dh
+	mov al, byte ptr[ecx+bh]
+	mov byte ptr[esi+bh], al
+	inc bh
+	cmp dh, dl
+	jne recur_ssplit
+	
+	mov byte ptr[esi+bh], 0     ; write null terminator
+	inc bh
+	
+	mov dh, ah
+	mov dl, ah          ;check for null or 256th char overflow
+	
+	cmp dh, 256
+	je end_ssplt
+	dec dh
+	cmp byte ptr[ecx+dh], 0
+	je end_ssplt
+	inc dh
+	
+	add edi, 4
+	lea eax, [esi+bh]
+	mov dword ptr[edi], eax
+	
+	jmp mfloop
+	
+	end_ssplt:
+	mov esp, ebp
+	pop ebp
+	ret
+	
+get_argc:
+	push ebp
+	mov ebp, esp
+	sub esp, 0
+	xor edx, edx
+	
+	argc_mloop:
+	inc dl
+	mov eax, dword ptr[ebp+8] ;get *argv[] address
+	mov ebx, dword ptr[eax+dh]
+	add dh, 4
+	cmp ebx, 0
+	jne argc_mloop
+	
+	dec dl
+	mov al, dl ; return argc
+	
+	mov esp, ebp
+	pop ebp
+	ret
+	
+_atoi:
+	push ebp
+	mov ebp, esp
+	sub esp, 0
+	
+	mov ebx, dword ptr[ebp+8] ; get address of *char[]
+	xor ecx, ecx              ; cl = byte, ch = counter
+	mov eax, 1
+	mov edx, 1                ; edx = multiplicand
+	xor edi, edi              ; edi stores new int
+	xor esi, esi              ; esi stores old int
+	
+	pre_atoi_loop:
+	mov cl, [ebx+ch]
+	dec ch
+	cmp cl, 0
+	je atoi_mloop
+	add ch, 2
+	jmp pre_atoi_loop
+	
+	atoi_mloop:
+	mov cl, [ebx+ch]
+	cmp cl, 0
+	je atoi_end
+	
+	; begin actual conversion
+	sub cl, 0x30
+	movzx edi, cl
+	push eax
+	mul edi
+	add esi, eax
+	
+	dec ch
+	mov eax, 10
+	pop edx
+	mul edx
+	mov edx, eax
+	
+	jmp atoi_mloop
+	
+	atoi_end:
+	mov eax, esi
+	
+	mov esp, ebp
+	pop ebp
+	ret
+	
+_itoa:
+	push ebp
+	mov ebp, esp
+	
+	mov ebx, dword ptr[ebp+8]  ; get *char[]
+	xor ecx, ecx
+	
+	itoa_mloop:
+	mov cl, byte ptr[ebx+ch]
+	add cl, 0x30
+	mov byte ptr[ebx+ch], cl
+	inc ch
+	cmp ch, 5
+	jne itoa_mloop
+	
+	mov esp, ebp
+	pop ebp
+	ret
+
+_hex_to_char_:
+	;convert hex to decimal, mostly used before hex-to-ascii conversions
+	push ebp
+	mov ebp, esp
+	
+	mov ebx, dword ptr[ebp+8] ; eax contains value already, ebx contains address to print chars in decimal
+	xor edx, edx              ; remainder
+	xor edi, edi              ; counter
+	xor ecx, ecx              ; divisor
+	mov ecx, 10
+	
+    mov esi, eax                  ; save eax
+	
+	less_than_hundred:
+	mov eax, esi
+	cmp eax, 10
+	jl less_than_ten
+	mov ecx, 10
+	div ecx
+	
+	mov byte ptr[ebx+edi], al  ; save tens
+	inc edi
+	
+	mov eax, edx                ; save rem (ones left over)
+	mov esi, eax
+	
+	
+	less_than_ten:
+	mov byte ptr[ebx+edi], al  ; save ones
+	inc edi
+	
+	
+	end_htch_:
+	mov esp, ebp
+	pop ebp
+	ret
+
+;----------------------------------------------------------------------------------------------------------------------------
+;        ||| GENERAL PROMPT COMMANDS |||
+;----------------------------------------------------------------------------------------------------------------------------
+
+_add:
+	push ebp
+	mov ebp, esp
+	sub esp, 4
+	
+	;code here
+	mov eax, dword ptr[ebp+8]  ; get argc
+	dec eax
+	mov ebx, dword ptr[ebp+12] ; get *argv[]
+	xor ecx, ecx
+	xor edx, edx
+	
+	sub ebp, 4
+	mov dword ptr[ebp], 0
+	
+	cmp eax, 0
+	je add_help_sec
+	
+	add_mloop:
+	dec eax
+	add cl, 4
+	
+	;convert byte to int
+	mov esi, [ebx+cl] ; check here
+	
+	;save registers
+	push eax
+	push ebx
+	push ecx
+	push edi
+	push esi
+	
+	call _atoi  ;work here
+	
+	mov edx, eax ; int ends up in edx
+	mov eax, [ebp]
+	
+	;restore registers
+	pop esi
+	pop edi
+	pop ecx
+	pop ebx
+	pop eax
+	
+	add dword ptr[ebp], edx  ; sum = sum + newNumber
+	
+	;add edx, dword ptr[ebx+cl]  // might need
+	cmp eax, 0
+	jne add_mloop
+	
+	mov eax, dword ptr[ebp]  ; sum is stored in eax
+	
+	add ebp, 4
+	mov esp, ebp
+	pop ebp
+	ret
+	
+	add_help_sec:
+	
+
+_sub:
+	push ebp
+	mov ebp, esp
+	sub ebp, 0
+	
+	;code here
+	
+	mov esp, ebp
+	pop ebp
+	ret
+
+_mul:
+	push ebp
+	mov ebp, esp
+	sub ebp, 0
+	
+	;code here
+	
+	mov esp, ebp
+	pop ebp
+	ret
+
+_div:
+	push ebp
+	mov ebp, esp
+	sub ebp, 0
+	
+	;code here
+	
+	mov esp, ebp
+	pop ebp
+	ret
+
+_echo:
+	push ebp
+	mov ebp, esp
+	sub ebp, 0
+	
+	;code here
+	
+	mov esp, ebp
+	pop ebp
+	ret
+
+;------------------------------------------------------------------------------------------------------------------------------------------------
+;------------------------------------------------------------------------------------------------------------------------------------------------
+;******************************* INTERRUPT HANDLING *********************************************************************************************
+;------------------------------------------------------------------------------------------------------------------------------------------------
+;                       MAP
+;        32.  Timer 0  (sys clock)   33.  Timer 1  (watchdog)      34.  Timer 2           35.  Timer 3           36.
+;        37.                         38.                           39.
+;        40.                         41.                           42.                    43                     44.
+;        45.                         46.                           47.                    48.  Button sig        49. Console Input
+
+_set_ISrs_:
+	push ebp
+	mov ebp, esp
+	sub esp, 0
+	
+	mov eax, [ebp+8]         ; set eax to Int 32 IDT address
+	
+	mov ebx, _irq_32
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_33
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_34
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_35
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_36
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_37
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_38
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_39
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_40
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_41
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_42
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_43
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_44
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_45
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_46
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_47
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_48
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_49
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_50
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_51
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_52
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_53
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_54
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_55
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_56
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_57
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_58
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_59
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_60
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_61
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_62
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_63
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_64
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_65
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_66
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_67
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_68
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_69
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_70
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_71
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_72
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_73
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_74
+	mov dword ptr[eax], ebx
+	add eax, 4
+	mov ebx, _irq_75
+	mov dword ptr[eax], ebx
+	add eax, 4
+	
+	
+	mov esp, ebp
+	pop ebp
+	ret
+
+_irq_32:
+	; pre-emption
+	; scheduler
+	cli
+	push esp
+	push ebp
+	push edi
+	push esi
+	push edx
+	push ecx
+	push ebx
+	push eax
+	
+	mov eax, proc_id
+	mov ebx, 110
+	mul ebx
+	lea ebx, proc
+	add eax, ebx
+	
+	pop ebx
+	mov dword ptr[eax+69], ebx
+	pop ebx
+	mov dword ptr[eax+73], ebx
+	pop ebx
+	mov dword ptr[eax+77], ebx
+	pop ebx
+	mov dword ptr[eax+81], ebx
+	pop ebx
+	mov dword ptr[eax+85], ebx
+	pop ebx
+	mov dword ptr[eax+89], ebx
+	pop ebx
+	mov dword ptr[eax+93], ebx
+	pop ebx
+	mov dword ptr[eax+97], ebx
+	pop ebx
+	mov dword ptr[eax+101], ebx
+	
+	;scheduler
+	lea eax, proc                        ; find process list
+	
+	mov eax, proc_id
+	mov ebx, 110
+	mul ebx
+	lea ebx, proc
+	add eax, ebx
+	mov ebx, dword ptr[eax+101]
+	mov temp, ebx
+	
+	xrstor [eax+69]
+	add esp, 8
+	sti
+	jmp temp
+	
+	iret  ;should not need to get here. if we do, PANIC!
+
+_irq_33:
+    ; return ecx -> id
+	; ebx contains limit
+	
+	cli
+	push esi
+	push edi
+	push ebp
+	
+	xor ecx, ecx    ;condition of address
+	
+	irq33loop:
+	xor esi, edi
+	xor esi, eax
+	xor esi, ebx
+	sub esi, eax
+	sub esi, ebx
+	mov edi, dword ptr[esp]
+	cmp esi, ebx
+	jg irq33loop
+	
+	mov ecx, esi
+	
+	pop ebp
+	pop edi
+	pop esi
+	sti
+	iret
+
+_irq_34:
+	
+	iret
+
+_irq_35:
+	
+	iret
+
+_irq_36:
+	
+	iret
+
+_irq_37:
+	
+	iret
+
+_irq_38:
+	
+	iret
+
+_irq_39:
+	
+	iret
+
+_irq_40:
+	
+	iret
+
+_irq_41:
+	
+	iret
+
+_irq_42:
+	
+	iret
+
+_irq_43:
+	
+	iret
+
+_irq_44:
+	
+	iret
+
+_irq_45:
+	
+	iret
+
+_irq_46:
+	
+	iret
+
+_irq_47:
+	
+	iret
+
+_irq_48:
+	
+	iret
+
+_irq_49:
+	cli
+	push ebp
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push esi
+	push edi
+	
+	mov eax, input_text
+	push eax
+	call print_text
+	add esp, 4
+	mov proc_id, 2
+	sti
+	
+	call check_commands
+	
+	cli
+	mov proc_id, 1
+	pop edi
+	pop esi
+	pop edx
+	pop ecx
+	pop ebx
+	pop eax
+	pop ebp
+	sti
+	iret
+
+_irq_50:
+	
+	iret
+
+_irq_51:
+	
+	iret
+
+_irq_52:
+	
+	iret
+
+_irq_53:
+	
+	iret
+
+_irq_54:
+	
+	iret
+
+_irq_55:
+	
+	iret
+
+_irq_56:
+	
+	iret
+
+_irq_57:
+	
+	iret
+
+_irq_58:
+	
+	iret
+
+_irq_59:
+	
+	iret
+
+_irq_60:
+	
+	iret
+
+_irq_61:
+	
+	iret
+
+_irq_62:
+	
+	iret
+
+_irq_63:
+	
+	iret
+
+_irq_64:
+	
+	iret
+
+_irq_65:
+	
+	iret
+
+_irq_66:
+	
+	iret
+
+_irq_67:
+	
+	iret
+
+_irq_68:
+	
+	iret
+
+_irq_69:
+	
+	iret
+
+_irq_70:
+	
+	iret
+
+_irq_71:
+	
+	iret
+
+_irq_72:
+	
+	iret
+
+_irq_73:
+	
+	iret
+
+_irq_74:
+	
+	iret
+
+_irq_75:
+	
+	iret
